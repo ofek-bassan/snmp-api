@@ -13,3 +13,4 @@ logs/
 *.iml
 coverage/
 .nyc_output/
+.venv/

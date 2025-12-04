@@ -27,11 +27,12 @@ export class SnmpService {
       const options = {
         timeout,
         retries,
+        port,
       };
 
       const session = snmp.createSession(hostname, community, options);
-
-      session.get(oids, (error: Error | null, varbinds: any[] | undefined) => {
+    
+      session.get(oids, (error: Error | null, varbinds: any[] | undefined) =>          {
         session.close();
 
         if (error) {
@@ -51,14 +52,20 @@ export class SnmpService {
           logger.error('SNMP GET operation returned no data', { hostname, oids });
           reject(new SnmpError('SNMP GET returned no data', undefined, 500));
         } else {
+          const parsed = varbinds.map(vb => ({
+            oid: vb.oid,
+            raw: vb.value,
+            type: vb.type,
+            value: this.parseVarbind(vb),
+          }));
           logger.info('SNMP GET operation completed successfully', {
             hostname,
+            "test":this.parseVarbind(varbinds),
             oidCount: varbinds.length,
           });
-
           resolve({
             status: 'success',
-            data: varbinds,
+            data: parsed.map(p => p.value),
             hostname,
             operation: 'GET',
             timestamp: new Date().toISOString(),
@@ -80,6 +87,7 @@ export class SnmpService {
       const options = {
         timeout,
         retries,
+        port,
       };
 
       const session = snmp.createSession(hostname, community, options);
@@ -118,10 +126,16 @@ export class SnmpService {
             oid,
             varbindCount: varbinds.length,
           });
+          const parsed = varbinds.map(vb => ({
+            oid: vb.oid,
+            raw: vb.value,
+            type: vb.type,
+            value: this.parseVarbind(vb),
+          }));
 
           resolve({
             status: 'success',
-            data: varbinds,
+            data: parsed,
             hostname,
             operation: 'WALK',
             timestamp: new Date().toISOString(),
@@ -152,6 +166,7 @@ export class SnmpService {
       const options = {
         timeout,
         retries,
+        port,
       };
 
       const session = snmp.createSession(hostname, community, options);
@@ -193,9 +208,16 @@ export class SnmpService {
               varbindCount: varbinds.length,
             });
 
+            const parsed = varbinds.map(vb => ({
+            oid: vb.oid,
+            raw: vb.value,
+            type: vb.type,
+            value: this.parseVarbind(vb),
+            }));
+            
             resolve({
               status: 'success',
-              data: varbinds,
+              data: parsed,
               hostname,
               operation: 'BULK',
               timestamp: new Date().toISOString(),
@@ -231,9 +253,17 @@ export class SnmpService {
               )
             );
           } else {
+
+            const parsed = varbinds.map(vb => ({
+            oid: vb.oid,
+            raw: vb.value,
+            type: vb.type,
+            value: this.parseVarbind(vb),
+            }));
+
             resolve({
               status: 'success',
-              data: varbinds,
+              data: parsed,
               hostname,
               operation: 'BULK',
               timestamp: new Date().toISOString(),
@@ -244,60 +274,105 @@ export class SnmpService {
     });
   }
 
+  private parseVarbind(vb: any) {
+  switch (vb.type) {
+    case snmp.ObjectType.OctetString:
+      return vb.value.toString('utf8'); // convert bytes → string
+
+    case snmp.ObjectType.IpAddress:
+      return vb.value.join('.'); // convert bytes → IPv4 string
+
+    case snmp.ObjectType.OctetString:
+      return Buffer.from(vb.value).toString(); // ASCII
+
+    case snmp.ObjectType.Integer:
+    case snmp.ObjectType.Counter:
+    case snmp.ObjectType.Gauge:
+    case snmp.ObjectType.TimeTicks:
+      return vb.value;
+
+    default:
+      return vb.value; // fallback
+  }
+}
+
+
   /**
    * Walk a table OID and convert results to structured table data
    * This correctly handles table OIDs by indexing results by instance identifier
    */
   async walkTable(request: SnmpWalkRequest): Promise<SnmpResponse> {
-    const { hostname, oid } = request;
+  const { hostname, oid } = request;
 
-    logger.info('SNMP table walk started', { hostname, oid });
+  logger.info("SNMP table walk started", { hostname, oid });
 
-    try {
-      const walkResponse = await this.walk(request);
-      const varbinds = walkResponse.data as any[];
+  try {
+    // Perform normal walk
+    const walkResponse = await this.walk(request);
+    const varbinds = walkResponse.data as any[];
 
-      // Convert flat varbind list to structured table
-      const tableData: TableData = {};
+    // Table format: baseOID.column.index
+    // Example: 1.3.6.1.2.1.2.2.1.2.1 = ifDescr.1
+    const baseParts = oid.split(".");
+    const rows: Record<string, any> = {};
 
-      for (const varbind of varbinds) {
-        const parts = varbind.oid.split('.');
-        const baseOidParts = oid.split('.');
+    for (const vb of varbinds) {
+      const parts = vb.oid.split(".");
 
-        // Extract the index part (everything after the base OID)
-        const indexPart = parts.slice(baseOidParts.length).join('.');
+      const column = parts[baseParts.length];       // column number
+      const index = parts[baseParts.length + 1];    // instance index
 
-        if (!tableData[indexPart]) {
-          tableData[indexPart] = {};
-        }
+      if (!rows[index]) rows[index] = { index };
 
-        // Extract column number and value
-        const colNum = parts[baseOidParts.length];
-        tableData[indexPart][`col_${colNum}`] = {
-          oid: varbind.oid,
-          type: varbind.type,
-          value: varbind.value,
-        };
-      }
+      const cleanColumn = this.resolveColumnName(oid, column);
 
-      logger.info('SNMP table walk converted to structured format', {
-        hostname,
-        oid,
-        rows: Object.keys(tableData).length,
-      });
-
-      return {
-        status: 'success',
-        data: tableData,
-        hostname,
-        operation: 'WALK',
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      logger.error('SNMP table walk failed', { hostname, oid, error });
-      throw error;
+      rows[index][cleanColumn] = vb.value;
     }
+
+    const result = Object.values(rows); // convert to array
+
+    logger.info("SNMP table walk parsed", {
+      hostname,
+      oid,
+      rows: result.length,
+    });
+
+    return {
+      status: "success",
+      data: result,
+      hostname,
+      operation: "WALK",
+      timestamp: new Date().toISOString(),
+    };
+
+  } catch (err) {
+    logger.error("SNMP table walk failed", { hostname, oid, err });
+    throw err;
   }
+}
+
+private resolveColumnName(baseOid: string, col: string): string {
+  const base = baseOid.replace(/\.$/, "");
+
+  // IF-MIB::ifTable
+  if (base === "1.3.6.1.2.1.2.2.1") {
+    const map: Record<string, string> = {
+      "1": "ifIndex",
+      "2": "ifDescr",
+      "3": "ifType",
+      "4": "ifMtu",
+      "5": "ifSpeed",
+      "6": "ifPhysAddress",
+      "7": "ifAdminStatus",
+      "8": "ifOperStatus",
+      "9": "ifLastChange"
+    };
+    return map[col] || `col_${col}`;
+  }
+
+  return `col_${col}`;
+}
+
 
   /**
    * Determine if an OID is a table OID (ends with .1 for the entry)
@@ -308,3 +383,4 @@ export class SnmpService {
 }
 
 export default new SnmpService();
+

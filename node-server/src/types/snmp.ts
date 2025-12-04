@@ -3,6 +3,7 @@ export interface SnmpGetRequest {
   oid: string | string[];
   community?: string;
   port?: number;
+  asTable?: boolean;
   timeout?: number;
   retries?: number;
 }
